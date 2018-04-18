@@ -17,32 +17,43 @@ def setColor(p, color):
 	p.movi((color[2]<<4) | (color[1]<<1) | color[0], ".PTAD")
 	pass
 
-# Can wait for up to 1.25MHz/256/256/256 = 13.422s
-# 1.25MHz/256 is the MTIM clock prescaler
+# Can wait for up to MTIM_PERIOD=0.839s
+MTIM_PERIOD = 1.0 / (1250000 / 16 / 256 / 256)
+print(MTIM_PERIOD)
+# 1.25MHz/16 is the MTIM clock prescaler
 # /256 is the MTIM modulo
 # /256 is the 8 bit counter in A
 # Brightness is in parts per 256 (e.g. 128 is 50% brightness)
 # Color is 0 or 1 for each of R, G, and B
+def mtimWaitSpan(p, color, brightness, timeSeconds):
+	loopAmt = MTIM_PERIOD * 0.95
+	while timeSeconds > loopAmt:
+		mtimWait(p, color, brightness, loopAmt)
+		timeSeconds -= loopAmt
+	if timeSeconds > 0:
+		mtimWait(p, color, brightness, timeSeconds)
+	pass
+
 mtimWaitInstances = set()
 def mtimWait(p, color, brightness, timeSeconds):
 	if brightness < 1 or brightness > 255:
 		raise Exception("Brightness must be a reasonable value")
 
-	numIters = int(timeSeconds * 256 / 13.422)
+	numIters = int(timeSeconds * 256 / MTIM_PERIOD)
 	if numIters < 1 or numIters > 255:
-		raise Exception("'%s' is out of range"%timeSeconds)
+		raise Exception("'%s' is out of range with '%s' iters"%(timeSeconds, numIters))
 
 	fnname = "mtimWait_%s%s%s_%s_%s"%(color[0], color[1], color[2], brightness, numIters)
 	p.jsr(fnname)
 	mtimWaitInstances.add((color, brightness, timeSeconds))
 
 def mtimWaitCode(p, color, brightness, timeSeconds):
-	numIters = int(timeSeconds * 256 / 13.422)
+	numIters = int(timeSeconds * 256 / MTIM_PERIOD)
 	fnname = "mtimWait_%s%s%s_%s_%s"%(color[0], color[1], color[2], brightness, numIters)
 
 	# Accumulator counts down from numIters
 	p.label(fnname)
-	p.movi(0x08, ".MTIMCLK") # Divide the bus clock by 256
+	p.movi(0x04, ".MTIMCLK") # Divide the bus clock by 16
 	p.ldai(numIters)
 
 	p.label(fnname+"_loop")
@@ -108,9 +119,9 @@ p.movi(0x20, pageAddr(p, ".PTAPE"))
 p.movi(0x13, ".PTADD")
 
 # Light each of R,G,B for 1/2 second
-mtimWait(p, (1,0,0), 64, 0.5)
-mtimWait(p, (0,1,0), 128, 0.5)
-mtimWait(p, (0,0,1), 255, 0.5)
+mtimWaitSpan(p, (1,0,0), 64, 0.5)
+mtimWaitSpan(p, (0,1,0), 128, 0.5)
+mtimWaitSpan(p, (0,0,1), 255, 0.5)
 
 # Setup the KBI and sleep
 p.label("setupKbiAndSleep")
@@ -126,15 +137,20 @@ p.label("kbi")
 
 p.movi(0x04, ".KBISC") # Write 1 to KBIACK, disable interrupt
 
-mtimWait(p, (0,0,0), 128, 1.0)
-mtimWait(p, (1,1,1), 255, 0.125)
+# Check every 10ms until the button is released
+p.label("waitForReleaseLoop")
+mtimWaitSpan(p, (0,0,1), 255, 0.01)
+p.brset(5, ".PTAD", "waitForReleaseLoop")
+
+mtimWaitSpan(p, (0,0,0), 128, 2.0)
+mtimWaitSpan(p, (1,1,1), 128, 0.125)
 p.jmp("setupKbiAndSleep")
 
 for c,b,t in mtimWaitInstances:
 	mtimWaitCode(p, c, b, t)
 
 if __name__ == "__main__":
-	print(p.assemble())
+	print(p.assemble()[1])
 
 	def doProgram():
 		from programmer import Programmer
